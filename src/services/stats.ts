@@ -1,0 +1,221 @@
+import { supabase } from '../db/supabase';
+import { HeadToHeadStats, Match, MatchRole, PairStats, PlayerPublic, PlayerStats } from '../types';
+
+const ELO_START = 1000;
+const ELO_K = 32;
+const ELO_MARGIN_MAX_MULTIPLIER = 3;
+const PAIR_MIN_MATCHES = 3;
+const H2H_MIN_MATCHES = 3;
+
+// Senza punteggio esatto il margine non è noto: multiplier neutro (1x, comportamento invariato).
+// Con punteggio, il delta ELO cresce con lo scarto (log per smorzare vittorie schiaccianti su poche partite).
+function marginMultiplier(scoreA: number | null, scoreB: number | null): number {
+  if (scoreA === null || scoreB === null) return 1;
+  const margin = Math.abs(scoreA - scoreB);
+  if (margin <= 1) return 1;
+  return Math.min(ELO_MARGIN_MAX_MULTIPLIER, Math.log2(margin + 1));
+}
+
+interface RoleTally {
+  attackMatches: number;
+  attackWins: number;
+  defenseMatches: number;
+  defenseWins: number;
+}
+
+function pairKey(a: string, b: string) {
+  return [a, b].sort().join('|');
+}
+
+function applyRole(tally: RoleTally, role: MatchRole, won: boolean) {
+  const weight = role === 'misto' ? 0.5 : 1;
+  if (role === 'attacco' || role === 'misto') {
+    tally.attackMatches += weight;
+    if (won) tally.attackWins += weight;
+  }
+  if (role === 'difesa' || role === 'misto') {
+    tally.defenseMatches += weight;
+    if (won) tally.defenseWins += weight;
+  }
+}
+
+async function fetchAllPlayersAndMatches(): Promise<{ players: PlayerPublic[]; matches: Match[] }> {
+  const [{ data: players, error: playersError }, { data: matches, error: matchesError }] = await Promise.all([
+    supabase.from('players').select('id, name').order('name'),
+    supabase.from('matches').select('*').order('played_at', { ascending: true }),
+  ]);
+
+  if (playersError) throw new Error(playersError.message);
+  if (matchesError) throw new Error(matchesError.message);
+
+  return { players: players ?? [], matches: (matches ?? []) as Match[] };
+}
+
+export async function computePlayerStats(): Promise<PlayerStats[]> {
+  const { players, matches } = await fetchAllPlayersAndMatches();
+
+  const elo = new Map(players.map((p) => [p.id, ELO_START]));
+  const matchesPlayed = new Map(players.map((p) => [p.id, 0]));
+  const wins = new Map(players.map((p) => [p.id, 0]));
+  const roleTally = new Map<string, RoleTally>(
+    players.map((p) => [p.id, { attackMatches: 0, attackWins: 0, defenseMatches: 0, defenseWins: 0 }])
+  );
+
+  for (const m of matches) {
+    const teamA = [
+      { id: m.team_a_player1_id, role: m.team_a_player1_role },
+      { id: m.team_a_player2_id, role: m.team_a_player2_role },
+    ];
+    const teamB = [
+      { id: m.team_b_player1_id, role: m.team_b_player1_role },
+      { id: m.team_b_player2_id, role: m.team_b_player2_role },
+    ];
+    const aWon = m.winner_team === 'A';
+
+    for (const { id } of [...teamA, ...teamB]) {
+      matchesPlayed.set(id, (matchesPlayed.get(id) ?? 0) + 1);
+    }
+    for (const { id } of teamA) if (aWon) wins.set(id, (wins.get(id) ?? 0) + 1);
+    for (const { id } of teamB) if (!aWon) wins.set(id, (wins.get(id) ?? 0) + 1);
+
+    for (const { id, role } of teamA) applyRole(roleTally.get(id)!, role, aWon);
+    for (const { id, role } of teamB) applyRole(roleTally.get(id)!, role, !aWon);
+
+    // ELO: rating di squadra = media dei due, delta diviso tra i membri
+    const ratingA = (elo.get(teamA[0].id)! + elo.get(teamA[1].id)!) / 2;
+    const ratingB = (elo.get(teamB[0].id)! + elo.get(teamB[1].id)!) / 2;
+    const expectedA = 1 / (1 + 10 ** ((ratingB - ratingA) / 400));
+    const actualA = aWon ? 1 : 0;
+    const multiplier = marginMultiplier(m.score_a, m.score_b);
+    const deltaA = ELO_K * multiplier * (actualA - expectedA);
+
+    for (const { id } of teamA) elo.set(id, elo.get(id)! + deltaA / 2);
+    for (const { id } of teamB) elo.set(id, elo.get(id)! - deltaA / 2);
+  }
+
+  const totalMatches = matches.length;
+
+  return players
+    .map((p) => {
+      const played = matchesPlayed.get(p.id) ?? 0;
+      const w = wins.get(p.id) ?? 0;
+      const tally = roleTally.get(p.id)!;
+      return {
+        playerId: p.id,
+        name: p.name,
+        matchesPlayed: played,
+        wins: w,
+        losses: played - w,
+        winRate: played > 0 ? w / played : 0,
+        weightShare: totalMatches > 0 ? played / totalMatches : 0,
+        elo: Math.round(elo.get(p.id) ?? ELO_START),
+        attackWinRate: tally.attackMatches > 0 ? tally.attackWins / tally.attackMatches : null,
+        attackMatches: tally.attackMatches,
+        defenseWinRate: tally.defenseMatches > 0 ? tally.defenseWins / tally.defenseMatches : null,
+        defenseMatches: tally.defenseMatches,
+      } satisfies PlayerStats;
+    })
+    .sort((a, b) => b.elo - a.elo);
+}
+
+export async function computePairStats(): Promise<PairStats[]> {
+  const { players, matches } = await fetchAllPlayersAndMatches();
+  const nameById = new Map(players.map((p) => [p.id, p.name]));
+
+  const individualMatches = new Map<string, number>();
+  const individualWins = new Map<string, number>();
+  const pairMatches = new Map<string, number>();
+  const pairWins = new Map<string, number>();
+
+  for (const m of matches) {
+    const teams = [
+      { players: [m.team_a_player1_id, m.team_a_player2_id], won: m.winner_team === 'A' },
+      { players: [m.team_b_player1_id, m.team_b_player2_id], won: m.winner_team === 'B' },
+    ];
+    for (const team of teams) {
+      for (const id of team.players) {
+        individualMatches.set(id, (individualMatches.get(id) ?? 0) + 1);
+        if (team.won) individualWins.set(id, (individualWins.get(id) ?? 0) + 1);
+      }
+      const key = pairKey(team.players[0], team.players[1]);
+      pairMatches.set(key, (pairMatches.get(key) ?? 0) + 1);
+      if (team.won) pairWins.set(key, (pairWins.get(key) ?? 0) + 1);
+    }
+  }
+
+  const results: PairStats[] = [];
+  for (const [key, together] of pairMatches.entries()) {
+    const [aId, bId] = key.split('|');
+    const winsTogether = pairWins.get(key) ?? 0;
+    const winRateTogether = together > 0 ? winsTogether / together : 0;
+    const belowThreshold = together < PAIR_MIN_MATCHES;
+
+    const aIndividualRate = (individualWins.get(aId) ?? 0) / (individualMatches.get(aId) ?? 1);
+    const bIndividualRate = (individualWins.get(bId) ?? 0) / (individualMatches.get(bId) ?? 1);
+    const synergyScore = belowThreshold
+      ? null
+      : winRateTogether - (aIndividualRate + bIndividualRate) / 2;
+
+    results.push({
+      playerAId: aId,
+      playerAName: nameById.get(aId) ?? '?',
+      playerBId: bId,
+      playerBName: nameById.get(bId) ?? '?',
+      matchesTogether: together,
+      winsTogether,
+      winRateTogether,
+      synergyScore,
+      belowThreshold,
+    });
+  }
+
+  return results.sort((a, b) => (b.synergyScore ?? -1) - (a.synergyScore ?? -1));
+}
+
+export async function computeHeadToHeadStats(): Promise<HeadToHeadStats[]> {
+  const { players, matches } = await fetchAllPlayersAndMatches();
+  const nameById = new Map(players.map((p) => [p.id, p.name]));
+
+  // conteggi direzionali: per ogni ordered pair (a,b), quante volte a ha battuto b
+  const matchesAgainst = new Map<string, number>();
+  const winsFor = new Map<string, number>();
+
+  const bump = (map: Map<string, number>, key: string, n = 1) => map.set(key, (map.get(key) ?? 0) + n);
+
+  for (const m of matches) {
+    const teamA = [m.team_a_player1_id, m.team_a_player2_id];
+    const teamB = [m.team_b_player1_id, m.team_b_player2_id];
+    const aWon = m.winner_team === 'A';
+
+    for (const a of teamA) {
+      for (const b of teamB) {
+        bump(matchesAgainst, pairKey(a, b));
+        if (aWon) bump(winsFor, `${a}>${b}`);
+        else bump(winsFor, `${b}>${a}`);
+      }
+    }
+  }
+
+  const results: HeadToHeadStats[] = [];
+  const seen = new Set<string>();
+  for (const key of matchesAgainst.keys()) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const [aId, bId] = key.split('|');
+    const total = matchesAgainst.get(key) ?? 0;
+    const aWinsAgainstB = winsFor.get(`${aId}>${bId}`) ?? 0;
+
+    results.push({
+      playerAId: aId,
+      playerAName: nameById.get(aId) ?? '?',
+      playerBId: bId,
+      playerBName: nameById.get(bId) ?? '?',
+      matchesAgainst: total,
+      aWinsAgainstB,
+      aWinRateAgainstB: total > 0 ? aWinsAgainstB / total : 0,
+      belowThreshold: total < H2H_MIN_MATCHES,
+    });
+  }
+
+  return results;
+}
