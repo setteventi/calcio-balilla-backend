@@ -15,10 +15,9 @@ function issueSession(res: import('express').Response, playerId: string, name: s
   res.cookie('session', token, {
     httpOnly: true,
     secure: isProd,
-    // In produzione frontend e backend vivono su domini diversi (es. vercel.app / onrender.com):
-    // il cookie deve poter attraversare siti diversi, quindi serve SameSite=None (richiede secure=true).
-    // In locale restano sullo stesso host quindi Lax basta e non richiede HTTPS.
-    sameSite: isProd ? 'none' : 'lax',
+    // Il browser parla sempre con il dominio del frontend (proxy /api in next.config.ts),
+    // quindi dal suo punto di vista è same-site: Lax basta, non serve None.
+    sameSite: 'lax',
     maxAge: 180 * 24 * 60 * 60 * 1000,
   });
 }
