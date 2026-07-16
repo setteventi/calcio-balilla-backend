@@ -1,5 +1,13 @@
 import { supabase } from '../db/supabase';
-import { HeadToHeadStats, Match, MatchRole, PairStats, PlayerPublic, PlayerStats } from '../types';
+import {
+  HeadToHeadStats,
+  Match,
+  MatchRole,
+  MatchTimelineEntry,
+  PairStats,
+  PlayerPublic,
+  PlayerStats,
+} from '../types';
 
 const ELO_START = 1000;
 const ELO_K = 32;
@@ -51,15 +59,25 @@ async function fetchAllPlayersAndMatches(): Promise<{ players: PlayerPublic[]; m
   return { players: players ?? [], matches: (matches ?? []) as Match[] };
 }
 
-export async function computePlayerStats(): Promise<PlayerStats[]> {
-  const { players, matches } = await fetchAllPlayersAndMatches();
+interface EloSimulation {
+  finalElo: Map<string, number>;
+  matchesPlayed: Map<string, number>;
+  wins: Map<string, number>;
+  roleTally: Map<string, RoleTally>;
+  timeline: MatchTimelineEntry[];
+}
 
+// Rigioca tutte le partite in ordine cronologico, aggiornando ELO/partite/ruoli
+// passo dopo passo. Un solo replay condiviso da computePlayerStats (che usa solo
+// il rating finale) e computeMatchTimeline (che usa anche gli snapshot intermedi).
+function simulateElo(players: PlayerPublic[], matches: Match[]): EloSimulation {
   const elo = new Map(players.map((p) => [p.id, ELO_START]));
   const matchesPlayed = new Map(players.map((p) => [p.id, 0]));
   const wins = new Map(players.map((p) => [p.id, 0]));
   const roleTally = new Map<string, RoleTally>(
     players.map((p) => [p.id, { attackMatches: 0, attackWins: 0, defenseMatches: 0, defenseWins: 0 }])
   );
+  const timeline: MatchTimelineEntry[] = [];
 
   for (const m of matches) {
     const teamA = [
@@ -91,7 +109,27 @@ export async function computePlayerStats(): Promise<PlayerStats[]> {
 
     for (const { id } of teamA) elo.set(id, elo.get(id)! + deltaA / 2);
     for (const { id } of teamB) elo.set(id, elo.get(id)! - deltaA / 2);
+
+    timeline.push({
+      matchId: m.id,
+      playedAt: m.played_at,
+      scoreA: m.score_a,
+      scoreB: m.score_b,
+      eloAfter: Object.fromEntries([...elo.entries()].map(([id, rating]) => [id, Math.round(rating)])),
+    });
   }
+
+  return { finalElo: elo, matchesPlayed, wins, roleTally, timeline };
+}
+
+export async function computeMatchTimeline(): Promise<MatchTimelineEntry[]> {
+  const { players, matches } = await fetchAllPlayersAndMatches();
+  return simulateElo(players, matches).timeline;
+}
+
+export async function computePlayerStats(): Promise<PlayerStats[]> {
+  const { players, matches } = await fetchAllPlayersAndMatches();
+  const { finalElo: elo, matchesPlayed, wins, roleTally } = simulateElo(players, matches);
 
   const totalMatches = matches.length;
 

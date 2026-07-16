@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { computeHeadToHeadStats, computePairStats, computePlayerStats } from '../services/stats';
+import {
+  computeHeadToHeadStats,
+  computeMatchTimeline,
+  computePairStats,
+  computePlayerStats,
+} from '../services/stats';
 
 export const statsRouter = Router();
 
@@ -25,6 +30,14 @@ statsRouter.get('/pairs', async (_req, res) => {
 statsRouter.get('/head-to-head', async (_req, res) => {
   try {
     res.json(await computeHeadToHeadStats());
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+statsRouter.get('/timeline', async (_req, res) => {
+  try {
+    res.json(await computeMatchTimeline());
   } catch (e) {
     res.status(500).json({ error: (e as Error).message });
   }

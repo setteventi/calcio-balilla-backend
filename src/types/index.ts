@@ -82,3 +82,11 @@ export interface HeadToHeadStats {
   aWinRateAgainstB: number;
   belowThreshold: boolean;
 }
+
+export interface MatchTimelineEntry {
+  matchId: string;
+  playedAt: string;
+  scoreA: number | null;
+  scoreB: number | null;
+  eloAfter: Record<string, number>;
+}
