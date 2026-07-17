@@ -158,3 +158,20 @@ matchesRouter.put('/:id', async (req: AuthedRequest, res) => {
   }
   res.json(data);
 });
+
+matchesRouter.delete('/:id', async (req, res) => {
+  // Nessun controllo di ownership: coerente con inserimento/modifica, chiunque
+  // dei giocatori loggati può cancellare una partita registrata per errore.
+  const { data, error } = await supabase
+    .from('matches')
+    .delete()
+    .eq('id', req.params.id)
+    .select('id')
+    .single();
+
+  if (error || !data) {
+    res.status(404).json({ error: error?.message || 'Partita non trovata' });
+    return;
+  }
+  res.json({ ok: true, id: data.id });
+});
