@@ -1,5 +1,6 @@
 import { supabase } from '../db/supabase';
 import {
+  DaysAtTopEntry,
   HeadToHeadStats,
   Match,
   MatchRole,
@@ -8,6 +9,28 @@ import {
   PlayerPublic,
   PlayerStats,
 } from '../types';
+
+const TIMEZONE = 'Europe/Rome';
+
+// YYYY-MM-DD della data locale italiana per un istante ISO.
+function romeDate(iso: string | Date): string {
+  return new Date(iso).toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+}
+
+// Tutte le date-calendario (YYYY-MM-DD) da `fromYmd` a `toYmd` incluse.
+// Aritmetica in UTC su date "nude": conta i giorni-calendario senza problemi di DST.
+function eachDay(fromYmd: string, toYmd: string): string[] {
+  const parse = (ymd: string) => {
+    const [y, m, d] = ymd.split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  const out: string[] = [];
+  const end = parse(toYmd);
+  for (let cur = parse(fromYmd); cur <= end; cur += 86_400_000) {
+    out.push(new Date(cur).toISOString().slice(0, 10));
+  }
+  return out;
+}
 
 const ELO_START = 1000;
 const ELO_K = 32;
@@ -125,6 +148,56 @@ function simulateElo(players: PlayerPublic[], matches: Match[]): EloSimulation {
 export async function computeMatchTimeline(): Promise<MatchTimelineEntry[]> {
   const { players, matches } = await fetchAllPlayersAndMatches();
   return simulateElo(players, matches).timeline;
+}
+
+// Giorni trascorsi da n.1 assoluto (top ELO), stile "settimane da numero 1" del tennis.
+// Ad ogni partita ricalcola chi è in vetta; ogni giorno-calendario viene attribuito
+// al n.1 di fine giornata, portando avanti il leader nei giorni senza partite —
+// così la classifica cresce da sola giorno dopo giorno anche se non si gioca.
+export async function computeDaysAtTop(): Promise<DaysAtTopEntry[]> {
+  const { players, matches } = await fetchAllPlayersAndMatches();
+  const { timeline } = simulateElo(players, matches);
+  if (timeline.length === 0) return [];
+
+  const nameById = new Map(players.map((p) => [p.id, p.name]));
+
+  // Leader unico di fine giornata per ogni data con almeno una partita.
+  // Sui pareggi in vetta resta l'incumbent; se viene scavalcato da un pareggio
+  // multiplo, quel periodo non ha un n.1 unico (nessuno se ne prende il merito).
+  const endOfDayLeader = new Map<string, string | null>();
+  let incumbent: string | null = null;
+
+  for (const entry of timeline) {
+    const elo = entry.eloAfter;
+    const maxVal = Math.max(...Object.values(elo));
+    const leaders = Object.keys(elo).filter((id) => elo[id] === maxVal);
+
+    if (leaders.length === 1) incumbent = leaders[0];
+    else if (!(incumbent && leaders.includes(incumbent))) incumbent = null;
+    // (se l'incumbent è ancora tra i pari-vetta, mantiene la corona)
+
+    endOfDayLeader.set(romeDate(entry.playedAt), incumbent);
+  }
+
+  const firstDay = romeDate(timeline[0].playedAt);
+  const today = romeDate(new Date());
+
+  const days = new Map<string, number>();
+  let carried: string | null = null;
+  for (const day of eachDay(firstDay, today)) {
+    if (endOfDayLeader.has(day)) carried = endOfDayLeader.get(day)!;
+    if (carried) days.set(carried, (days.get(carried) ?? 0) + 1);
+  }
+
+  const currentLeader = carried;
+  return [...days.entries()]
+    .map(([playerId, count]) => ({
+      playerId,
+      name: nameById.get(playerId) ?? '?',
+      days: count,
+      isCurrent: playerId === currentLeader,
+    }))
+    .sort((a, b) => b.days - a.days);
 }
 
 export async function computePlayerStats(): Promise<PlayerStats[]> {

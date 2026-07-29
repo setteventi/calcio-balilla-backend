@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import {
+  computeDaysAtTop,
   computeHeadToHeadStats,
   computeMatchTimeline,
   computePairStats,
@@ -38,6 +39,14 @@ statsRouter.get('/head-to-head', async (_req, res) => {
 statsRouter.get('/timeline', async (_req, res) => {
   try {
     res.json(await computeMatchTimeline());
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+statsRouter.get('/days-at-top', async (_req, res) => {
+  try {
+    res.json(await computeDaysAtTop());
   } catch (e) {
     res.status(500).json({ error: (e as Error).message });
   }

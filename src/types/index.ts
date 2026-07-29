@@ -90,3 +90,10 @@ export interface MatchTimelineEntry {
   scoreB: number | null;
   eloAfter: Record<string, number>;
 }
+
+export interface DaysAtTopEntry {
+  playerId: string;
+  name: string;
+  days: number; // giorni totali trascorsi da n.1 in classifica ELO
+  isCurrent: boolean; // è il n.1 attuale
+}
