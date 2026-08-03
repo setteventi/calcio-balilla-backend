@@ -97,3 +97,10 @@ export interface DaysAtTopEntry {
   days: number; // giorni totali trascorsi da n.1 in classifica ELO
   isCurrent: boolean; // è il n.1 attuale
 }
+
+export interface FreezePeriod {
+  id: string;
+  start_date: string; // YYYY-MM-DD inclusivo
+  end_date: string; // YYYY-MM-DD inclusivo
+  created_at: string;
+}

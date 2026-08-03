@@ -1,6 +1,7 @@
 import { supabase } from '../db/supabase';
 import {
   DaysAtTopEntry,
+  FreezePeriod,
   HeadToHeadStats,
   Match,
   MatchRole,
@@ -82,6 +83,17 @@ async function fetchAllPlayersAndMatches(): Promise<{ players: PlayerPublic[]; m
   return { players: players ?? [], matches: (matches ?? []) as Match[] };
 }
 
+// Periodi di freeze (pausa estiva ecc.). Tollerante: se la tabella non esiste
+// ancora (migrazione non eseguita), restituisce [] invece di far fallire tutto.
+async function fetchFreezePeriods(): Promise<FreezePeriod[]> {
+  const { data, error } = await supabase
+    .from('freeze_periods')
+    .select('id, start_date, end_date, created_at')
+    .order('start_date', { ascending: true });
+  if (error) return [];
+  return (data ?? []) as FreezePeriod[];
+}
+
 interface EloSimulation {
   finalElo: Map<string, number>;
   matchesPlayed: Map<string, number>;
@@ -159,6 +171,12 @@ export async function computeDaysAtTop(): Promise<DaysAtTopEntry[]> {
   const { timeline } = simulateElo(players, matches);
   if (timeline.length === 0) return [];
 
+  // Giorni "congelati" (pausa estiva ecc.): non vengono conteggiati per nessuno.
+  // Confronto lessicale su YYYY-MM-DD = confronto cronologico.
+  const freezePeriods = await fetchFreezePeriods();
+  const isFrozen = (day: string) =>
+    freezePeriods.some((p) => day >= p.start_date && day <= p.end_date);
+
   const nameById = new Map(players.map((p) => [p.id, p.name]));
 
   // Leader unico di fine giornata per ogni data con almeno una partita.
@@ -186,6 +204,7 @@ export async function computeDaysAtTop(): Promise<DaysAtTopEntry[]> {
   let carried: string | null = null;
   for (const day of eachDay(firstDay, today)) {
     if (endOfDayLeader.has(day)) carried = endOfDayLeader.get(day)!;
+    if (isFrozen(day)) continue; // pausa estiva: il leader resta ma non accumula
     if (carried) days.set(carried, (days.get(carried) ?? 0) + 1);
   }
 

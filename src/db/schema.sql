@@ -50,3 +50,13 @@ create index if not exists idx_matches_team_a_p1 on matches (team_a_player1_id);
 create index if not exists idx_matches_team_a_p2 on matches (team_a_player2_id);
 create index if not exists idx_matches_team_b_p1 on matches (team_b_player1_id);
 create index if not exists idx_matches_team_b_p2 on matches (team_b_player2_id);
+
+-- Periodi di "freeze" (es. pausa estiva): i giorni compresi non vengono conteggiati
+-- nella classifica "Giorni da n.1". Date-calendario inclusive.
+create table if not exists freeze_periods (
+  id uuid primary key default gen_random_uuid(),
+  start_date date not null,
+  end_date date not null,
+  created_at timestamptz not null default now(),
+  constraint valid_range check (end_date >= start_date)
+);
