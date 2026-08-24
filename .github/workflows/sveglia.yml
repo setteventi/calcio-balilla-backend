@@ -1,0 +1,39 @@
+# Sveglia periodica dei servizi gratuiti.
+#
+# Perché esiste: Supabase sospende i progetti free dopo 7 giorni senza attività. Questo gruppo
+# smette regolarmente di giocare per più di una settimana — esiste apposta la funzione "freeze"
+# per la pausa estiva — quindi il database si spegneva da solo e l'app sembrava rotta: le
+# schermate si disegnavano ma le liste restavano vuote, senza spiegare perché. Una query ogni
+# tre giorni azzera quel contatore.
+#
+# /health/db interroga davvero il database (non è un semplice ping HTTP), quindi conta come
+# attività per Supabase. Sveglia anche Render, ma solo per pochi minuti ogni tre giorni: nulla
+# rispetto alle 750 ore gratuite mensili.
+#
+# ⚠️ GitHub disattiva le azioni programmate nei repository fermi da 60 giorni: se il progetto
+# resta immobile per due mesi, va riattivata a mano dalla tab Actions.
+name: Sveglia servizi
+
+on:
+  schedule:
+    - cron: "0 6 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  sveglia:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Interroga il database (con attesa per il risveglio di Render)
+        run: |
+          URL="https://calcio-balilla-backend.onrender.com/health/db"
+          for tentativo in 1 2 3 4 5 6; do
+            codice=$(curl -s -o /tmp/risposta.json -w "%{http_code}" --max-time 90 "$URL" || echo "000")
+            echo "tentativo $tentativo → HTTP $codice · $(cat /tmp/risposta.json 2>/dev/null)"
+            if [ "$codice" = "200" ]; then
+              echo "Database sveglio."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Il database non ha risposto dopo 6 tentativi: forse il progetto Supabase è sospeso e va riattivato a mano."
+          exit 1
