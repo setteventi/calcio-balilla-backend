@@ -18,21 +18,6 @@ function romeDate(iso: string | Date): string {
   return new Date(iso).toLocaleDateString('en-CA', { timeZone: TIMEZONE });
 }
 
-// Tutte le date-calendario (YYYY-MM-DD) da `fromYmd` a `toYmd` incluse.
-// Aritmetica in UTC su date "nude": conta i giorni-calendario senza problemi di DST.
-function eachDay(fromYmd: string, toYmd: string): string[] {
-  const parse = (ymd: string) => {
-    const [y, m, d] = ymd.split('-').map(Number);
-    return Date.UTC(y, m - 1, d);
-  };
-  const out: string[] = [];
-  const end = parse(toYmd);
-  for (let cur = parse(fromYmd); cur <= end; cur += 86_400_000) {
-    out.push(new Date(cur).toISOString().slice(0, 10));
-  }
-  return out;
-}
-
 const ELO_START = 1000;
 const ELO_K = 32;
 const ELO_MARGIN_MAX_MULTIPLIER = 3;
@@ -163,9 +148,10 @@ export async function computeMatchTimeline(): Promise<MatchTimelineEntry[]> {
 }
 
 // Giorni trascorsi da n.1 assoluto (top ELO), stile "settimane da numero 1" del tennis.
-// Ad ogni partita ricalcola chi è in vetta; ogni giorno-calendario viene attribuito
-// al n.1 di fine giornata, portando avanti il leader nei giorni senza partite —
-// così la classifica cresce da sola giorno dopo giorno anche se non si gioca.
+// Ad ogni partita ricalcola chi è in vetta; ogni giorno IN CUI SI È GIOCATO viene
+// attribuito al n.1 di fine giornata. I giorni senza partite non contano per nessuno:
+// il primo non accumula mentre il gruppo non gioca. Essendo ricalcolato a ogni richiesta
+// sull'intero storico, la regola vale anche all'indietro.
 export async function computeDaysAtTop(): Promise<DaysAtTopEntry[]> {
   const { players, matches } = await fetchAllPlayersAndMatches();
   const { timeline } = simulateElo(players, matches);
@@ -197,18 +183,14 @@ export async function computeDaysAtTop(): Promise<DaysAtTopEntry[]> {
     endOfDayLeader.set(romeDate(entry.playedAt), incumbent);
   }
 
-  const firstDay = romeDate(timeline[0].playedAt);
-  const today = romeDate(new Date());
-
+  // endOfDayLeader contiene solo i giorni con almeno una partita, in ordine cronologico.
   const days = new Map<string, number>();
-  let carried: string | null = null;
-  for (const day of eachDay(firstDay, today)) {
-    if (endOfDayLeader.has(day)) carried = endOfDayLeader.get(day)!;
-    if (isFrozen(day)) continue; // pausa estiva: il leader resta ma non accumula
-    if (carried) days.set(carried, (days.get(carried) ?? 0) + 1);
+  for (const [day, leader] of endOfDayLeader) {
+    if (isFrozen(day)) continue; // partite giocate in pausa: valgono per l'ELO, non per i giorni
+    if (leader) days.set(leader, (days.get(leader) ?? 0) + 1);
   }
 
-  const currentLeader = carried;
+  const currentLeader = incumbent;
   return [...days.entries()]
     .map(([playerId, count]) => ({
       playerId,
